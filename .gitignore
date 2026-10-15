@@ -1,0 +1,27 @@
+# Python virtual environment (avoids tracking thousands of library files)
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDEs and Editors
+.vscode/
+.idea/
+
+# Large audio/media outputs (optional - add if you don't want to upload large generated files)
+*.mp3
+*.mid
+*.midi
+
+AGENTS.md
