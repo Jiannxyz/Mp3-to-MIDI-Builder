@@ -3,9 +3,14 @@
 A local web app that builds karaoke MIDI files (`.mid`) with musical notes and
 timestamped lyrics, for use in **SongHub Karaoke PC**.
 
-**Status: Milestone 1.** This milestone generates a fixed demo song so the MIDI
-structure can be inspected and tested. It does **not** read your MP3 or WAV yet,
-and it does **not** transcribe audio. Those come in later milestones.
+**Status: Milestone 2.** You can upload an MP3 or WAV, enter the song title and
+singer, paste lyrics, and correct the timing of every word and note by hand in
+editable tables. The app then exports a karaoke MIDI for SongHub.
+
+**This milestone does not listen to the audio.** It does not work out notes,
+lyrics, or an arrangement for you. The lyric timing table and the MIDI note
+table are manual tools — and they remain the way you correct anything a later
+transcription milestone gets wrong.
 
 Personal use only. Process only audio and lyrics you are authorized to use.
 
@@ -78,16 +83,46 @@ Streamlit prints a local URL (usually <http://localhost:8501>).
 
 ## Using the app
 
-1. Click **Generate demo MIDI**.
-2. The app builds the file, re-parses the bytes it just produced, and reports
-   whether the structure verified.
-3. Click **Download MIDI**.
+The page is one numbered flow from top to bottom.
 
-Optional controls:
+1. **Step 1 - Song audio.** Upload an MP3 or WAV (50 MB limit). The filename and
+   duration appear, with a player. This is optional: the audio is only used for
+   preview and to warn you when lyrics run past the end.
+2. **Step 2 - Song title and singer.** SongHub shows these as
+   `[Song title] - [Singer]`.
+3. **Step 3 - Lyrics.** Paste your lyrics, one line of the song per line, then
+   press **Split lyrics into rows**. Choose *words* (safer) or *syllables*
+   (a rough guess — it gets "hello" right and "karaoke" wrong; every row stays
+   editable).
+4. **Step 4 - Check and correct the timings.** One row per word or syllable with
+   its own start and end time in seconds. Edit any cell. Errors appear with the
+   row number and what to do about them.
+5. **Step 5 - MIDI notes.** Type the notes yourself. Pitch 60 is middle C,
+   channel 0 is treated as the vocal melody. **Leaving this empty is fine** and
+   exports a lyrics-only file.
+6. **Step 6 - Preview and export.** The lyric sequence is shown next to the audio
+   player so you can check the timing against the music. Press **Generate MIDI
+   file**, then **Download MIDI**.
 
-- **Lyric offset (ms)** — shifts the lyric events only; notes never move.
-  Positive delays the highlight, negative advances it.
-- **Include bass track** — export the melody alone or melody plus bass.
+**Load demo song** (under the intro) fills everything with a short public-domain
+melody, which is the easiest way to see the whole flow working.
+
+### What the app checks for you
+
+Export is blocked until the tables are usable. It refuses to produce a file when:
+
+- there are no lyrics at all
+- a time is blank, not a number, or infinite
+- a time is negative (times start at 0)
+- a row ends before it starts
+- rows are out of time order — it names the two words rather than silently
+  reordering them, which would scramble the lyric text
+
+### Temporary files
+
+Uploaded audio is written to `data/workspace/` and removed when you press
+**Remove audio** or start the app again. Deletion is restricted to that folder:
+the code refuses to delete the workspace itself or anything outside it.
 
 ---
 
@@ -118,13 +153,28 @@ The demo content has been played in SongHub and confirmed working:
 
 - Title displays as `[Song name] - [Singer]`
 - Lyrics display and highlight **in time**
-- Melody is audible and plays through
+- Melody is audible, recognisable, and plays through
+- Bass sounds on every phrase
 
-One open question remains: **SongHub has been observed highlighting text
-before the word is actually sung.** The lyric offset slider exists to measure
-this. While testing, note whether the lead is **constant** or whether the text
-falls **progressively further behind** as the song goes on — a growing lead
-would mean SongHub is ignoring our tempo map, which an offset cannot fix.
+### "Lyrics appear too early" — check SongHub's settings first
+
+This is **not** a defect in the generated file. SongHub has a player setting:
+
+> **Reveal lyrics before start: 8000 ms** (default; must be greater than the
+> 5 s countdown)
+
+SongHub deliberately displays the lyric text several seconds **before** the
+music begins. Lower that value in SongHub's settings if you want the text to
+appear later.
+
+Four structurally different layouts (`s1`-`s4`, including one that reproduces
+the layout of known-good karaoke files exactly) all behaved **identically** in
+SongHub, which confirms the perceived earliness comes from the player rather
+than the file.
+
+**Leave the lyric offset at 0.** It exists only to correct genuinely mistimed
+individual words. A large offset interacts with SongHub's countdown and can make
+audio start before the countdown has finished.
 
 ---
 
@@ -158,15 +208,24 @@ anything a person has to perceive.
 ```
 app/
   karaoke_dialects.py   swappable lyric encodings; read this first
-  lyrics.py             lyric text and per-word timing model
+  lyrics.py             lyric text, timing model, syllable splitting
   midi_build.py         notes + lyrics -> .mid
   validate_midi.py      independent raw-byte SMF parser
-  export_service.py     build, validate and serialise (single entry point)
+  export_service.py     build -> validate -> bytes (single entry point)
   demo.py               the demo song used by the UI and the tests
+  audio.py              upload checks, duration probing, safe temp storage
+  timing.py             lyric table rows and their validation
+  notes.py              note table rows and their validation
+  tables.py             DataFrame <-> row conversion for st.data_editor
+  inspect_midi.py       structural report for any .mid file
   make_*_samples.py     generated calibration files for manual testing
 streamlit_app.py        the web page
-tests/                  43 automated tests
+tests/                  158 automated tests
 ```
+
+`tests/test_m2_app_smoke.py` runs the Streamlit script in-process with
+`AppTest`, so a crash anywhere on the page fails the test run rather than
+waiting to be discovered in a browser.
 
 ### Calibration files
 
@@ -182,11 +241,10 @@ python -m app.make_offset_samples   # lyric offset calibration
 
 ## Not in this milestone
 
-- Reading MP3/WAV, duration display, audio preview
-- Audio-to-MIDI transcription (Basic Pitch)
-- Vocal/instrument separation (Demucs)
-- Automatic lyric transcription
-- Uploading, and the timing editor UI
+- **Audio-to-MIDI transcription** (Basic Pitch) — the note table is manual
+- **Vocal/instrument separation** (Demucs)
+- **Automatic lyric transcription and timing** — the timing table is manual
+- Any upload of your audio to a server: processing is entirely local
 
 None of Demucs, Basic Pitch or any other heavyweight AI library is installed.
 

@@ -10,21 +10,66 @@ is uploaded, no lyrics are scraped, no commercial karaoke files are downloaded.
 
 ## Repo state
 
-Branch `main`, **no remote configured**. Milestone 1 complete: MIDI export
-service, Streamlit page, 43 tests. Milestones 2+ are not started.
+Branch `main`, **no remote configured**. Milestones 1-2 complete: MIDI export
+service and Streamlit page (upload, lyrics, timing table, note table, export),
+158 tests. Milestone 3+ not started.
 
 ```
 app/karaoke_dialects.py   swappable dialect definitions; DEFAULT_DIALECT is the one to use
-app/lyrics.py             lyric text + per-word timing model
+app/lyrics.py             lyric text, timing model, syllable splitting (heuristic)
 app/midi_build.py         notes + lyrics -> .mid (absolute ticks -> sorted -> deltas)
 app/validate_midi.py      INDEPENDENT raw-byte SMF parser (not mido)
 app/export_service.py     build -> validate -> bytes; single entry point for UI and tests
 app/demo.py               the fixed demo song (public-domain melody)
+app/audio.py              upload checks, duration probing, safe temp workspace
+app/timing.py             lyric table rows + validation (pure, no Streamlit)
+app/notes.py              note table rows + validation (pure, no Streamlit)
+app/tables.py             DataFrame <-> row conversion (pure; keeps streamlit_app.py thin)
+app/inspect_midi.py       structural report for any .mid file
 app/make_*_samples.py     generated calibration files for manual SongHub testing
 streamlit_app.py          the web page
-tests/test_m1.py          builder / dialect regression tests
-tests/test_export_service.py  service, ordering, delta-time and round-trip tests
+tests/test_m2_*.py        Milestone 2: timing, audio, notes, tables
 ```
+
+## Never trust `streamlit run` + HTTP 200 as an app test
+
+`streamlit run` returns a **static shell** and only executes the script when a
+browser opens a websocket. A 200 response proves the server booted, not that the
+page renders. Use `streamlit.testing.v1.AppTest` to run the script in-process:
+
+```python
+from streamlit.testing.v1 import AppTest
+at = AppTest.from_file("streamlit_app.py", default_timeout=30).run()
+assert not at.exception, [str(e.value) for e in at.exception]
+```
+
+`tests/test_m2_app_smoke.py` does this and exercises every step. Two real bugs
+were only findable this way; see below.
+
+## Milestone 2 rules worth keeping
+
+- **Never write `some_frame or other_frame`.** `or` calls `DataFrame.__bool__`,
+  which pandas refuses for any frame with more than one column, so this crashed
+  Step 5 with "The truth value of a DataFrame is ambiguous". Test the row list
+  instead. Use `app.tables.lyric_frame_for` / `note_frame_for`.
+- **Check the shape you hand to a table.** `DemoSong.lyric_lines` is nested
+  `Syllable` lists and `note_tracks` are `NoteTrack` objects - neither is a table
+  row. `demo_lyric_rows()` / `demo_note_rows()` convert them.
+- **Logic lives outside `streamlit_app.py`.** Importing that module runs the whole
+  UI, so anything worth testing lives in `timing.py` / `notes.py` / `tables.py`.
+- **Never assign an `st.data_editor` result back into the session-state key that
+  fed it** — that creates a feedback loop where edits vanish on every other
+  interaction. Use a `key` and read the returned value. Editor keys carry a
+  version counter (`lyric_editor_{version}`) so re-splitting starts clean.
+- **A lyrics-only export is valid, not an error.** No notes means no note tracks.
+- **`lyrics_in_melody_track=True` is only safe when a note track exists.** With no
+  notes there is nothing to interleave with, so the conductor track must carry the
+  lyrics. This silently dropped every lyric in a lyrics-only export until a test
+  caught it — do not remove the `bool(note_tracks)` guard.
+- **Negative lyric times used to be clamped to 0** and exported "successfully".
+  `export_service._lyric_structure_problems` now refuses; keep that check.
+- `safe_cleanup` refuses to delete the workspace base or anything outside it.
+  Tests cover that, because the alternative is deleting a user's files.
 
 ## Commands
 
@@ -36,8 +81,9 @@ tests/test_export_service.py  service, ordering, delta-time and round-trip tests
 .venv\Scripts\python.exe -m app.make_offset_samples   # lyric offset calibration
 ```
 
-`requirements.txt` now exists (mido, streamlit, pytest). Do not add
-Demucs / Basic Pitch / TensorFlow — Milestone 8+, and they force Python 3.11.
+`requirements.txt` exists (mido, streamlit, pandas, mutagen, pytest). mutagen
+reads MP3 duration from frame headers and needs no FFmpeg. Do not add Demucs /
+Basic Pitch / TensorFlow — later milestones, and they force Python 3.11.
 
 ## Tracked files that should not be tracked
 
@@ -45,6 +91,69 @@ Demucs / Basic Pitch / TensorFlow — Milestone 8+, and they force Python 3.11.
 `.gitignore` covers them but they were committed first, so ignore rules do not
 apply. They need `git rm --cached` (not done here — index changes are the
 user's call). Stale `.pyc` files can shadow edited source.
+
+## SongHub highlight lead — NOT a bug in our files (resolved)
+
+SongHub has a player setting: **"Reveal lyrics before start" = 8000 ms by
+default** (must exceed the 5 s countdown). The app therefore shows the lyric
+text several seconds before the music begins, **by design**. That is what
+looked like a "constant early highlight"; it is the player's setting, not a
+defect in the MIDI.
+
+Evidence it is not our file: `s1`-`s4` (four structurally different layouts)
+all behaved identically in SongHub. A layout that genuinely caused a lead would
+have changed the symptom in at least one variant. Separately, the user applied
+`lyric_offset=+1000 ms` and playback began *before* the countdown finished,
+which shows the offset interacting with SongHub's reveal/countdown scheduling
+rather than correcting anything.
+
+**Do not compensate for this with `lyric_offset`.** Keep the offset at 0 for
+normal use; it exists only for genuinely mistimed individual words. If the user
+wants the text to appear later, the correct lever is SongHub's own setting.
+
+## Reference-file layout — adopted
+
+Ground truth from two known-good karaoke files, both confirmed working:
+
+```
+track 0  conductor only: track_name, FF 21 midi_port, marker, set_tempo,
+         time/key signature. NO lyrics, NO notes.
+track 1  vocal melody (channel 0) WITH lyric events interleaved into it:
+           tick=3000  note_on  pitch=71
+           tick=3000  LYRIC        <- same tick, immediately after the note
+           tick=3027  note_off
+         - CR/LF at that SAME tick, not at the word's end
+         - every word coincides with a note onset (283/283 and 394/394)
+```
+
+These defaults now match it: `lyrics_in_melody_track=True`,
+`separator_timing="same_tick"`, `emit_midi_port=True`. This is **fidelity
+alignment for other players, not a fix for the early-text symptom** - all four
+variants behaved the same in SongHub, so it changed nothing measurable here.
+
+SongHub shows the title as `[Song name] - [Singer]`, read from the `FF 03` track
+name. A redundant `FF 01` artist text event was removed; writing one would also
+make the conductor track look lyric-bearing.
+
+## SongHub settings that affect playback
+
+- **Reveal lyrics before start: 8000 ms** (default). Must be > Countdown (5 s).
+  This is why lyrics are visible before the music starts. Reduce it in SongHub.
+- Countdown (5 s) interacts with file timing; a large lyric offset can make
+  audio start before the countdown completes.
+
+## Comparing against a known-good file
+
+`app/inspect_midi.py` reports format, PPQ, tempo map (flagging tempo
+*changes*), which meta event carries lyrics, track layout, and the **lead** —
+the tick gap between first lyric and first note per channel, plus how many
+lyric ticks coincide with a note onset.
+
+**Copyright handling:** reference files contain copyrighted lyrics. The analyzer
+reports lyric **timing and text length only**; `--show-text` is for files the
+user owns and must not be used on commercial files. Never copy reference lyrics
+into this project, never commit `reference/` (gitignored), never redistribute.
+Structure and timing conventions are the reusable output.
 
 ## Non-obvious rules
 

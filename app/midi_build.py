@@ -49,6 +49,7 @@ def _lyric_messages(
     ppq: int,
     bpm: int,
     lyric_offset: float = 0.0,
+    separator_timing: str = "word_end",
 ) -> list[mido.MetaMessage]:
     messages: list[mido.MetaMessage] = []
 
@@ -57,6 +58,11 @@ def _lyric_messages(
         # written later, which delays the highlight. Notes are untouched, so
         # this is the calibration knob for "the text highlights too early".
         return seconds_to_ticks(max(0.0, seconds + lyric_offset), ppq=ppq, bpm=bpm)
+
+    def separator_time(syllable: Syllable) -> float:
+        # Working karaoke files put CR/LF at the SAME tick as the word they
+        # terminate, not at the word's end. Both observed in real SongHub files.
+        return syllable.start if separator_timing == "same_tick" else syllable.end
 
     for syllable in line:
         messages.append(
@@ -72,7 +78,7 @@ def _lyric_messages(
                 mido.MetaMessage(
                     dialect.lyric_meta,
                     text=dialect.word_separator,
-                    time=tick(syllable.end),
+                    time=tick(separator_time(syllable)),
                 )
             )
 
@@ -82,7 +88,7 @@ def _lyric_messages(
             mido.MetaMessage(
                 dialect.lyric_meta,
                 text=dialect.line_separator,
-                time=tick(last.end),
+                time=tick(separator_time(last)),
             )
         )
 
@@ -171,8 +177,23 @@ def build_midi(
     bpm: int = BPM,
     ppq: int = PPQ,
     lyric_offset: float = 0.0,
+    lyrics_in_melody_track: bool = True,
+    separator_timing: str = "same_tick",
+    emit_midi_port: bool = True,
 ) -> mido.MidiFile:
     """Assemble notes + timed lyrics into a karaoke MIDI file.
+
+    `lyrics_in_melody_track` reproduces the layout of real working karaoke
+    files: the lyric events live in the SAME track as the vocal melody notes,
+    each written at the same tick as its note. Track 0 is a conductor track
+    carrying only tempo/signature information. SongHub may schedule separate
+    lyric and melody tracks with a fixed skew, which shows up as text
+    highlighting ahead of the singing.
+
+    `separator_timing` controls where CR/LF go: "word_end" (default) or
+    "same_tick", which is what the reference files do.
+
+    `emit_midi_port` adds FF 21 to each track, as the reference files do.
 
     For format 0 the tracks are still appended separately; mido merges them
     into a single track on save, which is exactly what format 0 requires.
@@ -193,16 +214,32 @@ def build_midi(
     meta_messages.append(mido.MetaMessage("time_signature", numerator=4, denominator=4, time=0))
     meta_messages.append(mido.MetaMessage("key_signature", key="C", time=0))
 
-    if artist and dialect.lyric_meta != "text":
-        # Only safe when lyrics live in FF 05. In a dialect that carries lyrics
-        # as FF 01 Text, an artist name written as FF 01 would be displayed and
-        # highlighted as if it were a sung lyric.
-        meta_messages.append(mido.MetaMessage("text", text=artist, time=0))
+    # The title SongHub shows comes from the track name above, formatted as
+    # "[Song] - [Singer]", so no extra FF 01 text is written here. An FF 01 in
+    # the conductor track would also make that track look lyric-bearing, which
+    # the working karaoke files avoid.
 
+    lyric_messages: list[mido.MetaMessage] = []
     for line in lines:
-        meta_messages.extend(
-            _lyric_messages(line, dialect, ppq=ppq, bpm=bpm, lyric_offset=lyric_offset)
+        lyric_messages.extend(
+            _lyric_messages(
+                line,
+                dialect,
+                ppq=ppq,
+                bpm=bpm,
+                lyric_offset=lyric_offset,
+                separator_timing=separator_timing,
+            )
         )
+
+    # Lyrics are merged into the melody track only when there IS a melody track.
+    # With no notes at all there is nothing to interleave with, so the conductor
+    # track must carry them instead - otherwise a lyrics-only export silently
+    # drops every lyric.
+    merge_lyrics_into_melody = lyrics_in_melody_track and bool(note_tracks)
+
+    if not merge_lyrics_into_melody:
+        meta_messages.extend(lyric_messages)
 
     # Guarantee non-decreasing absolute time no matter how the caller ordered
     # things. sort() is stable, so messages sharing a tick keep their insertion
@@ -211,8 +248,22 @@ def build_midi(
 
     absolute_tracks: list[list] = [meta_messages]
 
-    for track in note_tracks:
-        absolute_tracks.append(_note_messages(track, ppq=ppq, bpm=bpm))
+    for index, track in enumerate(note_tracks):
+        messages = _note_messages(track, ppq=ppq, bpm=bpm)
+
+        if merge_lyrics_into_melody and index == 0:
+            # Interleave lyrics into the melody track. Stable sort keeps
+            # note_on ahead of the lyric written at the same tick, which is the
+            # order the reference karaoke files use.
+            messages = messages + lyric_messages
+            messages.sort(key=lambda message: message.time)
+
+        if emit_midi_port:
+            messages.insert(
+                1, mido.MetaMessage("midi_port", port=index + 1, time=0)
+            )
+
+        absolute_tracks.append(messages)
 
     if dialect.smf_format == 0:
         # Format 0 is a single-track file, and mido checks len(tracks) == 1

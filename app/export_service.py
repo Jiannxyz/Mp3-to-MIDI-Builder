@@ -12,6 +12,7 @@ check: writer and reader would agree on the same wrong bytes.
 from __future__ import annotations
 
 import io
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -47,22 +48,53 @@ class ExportResult:
         return f"{len(self.problems)} problem(s): " + "; ".join(self.problems)
 
 
-def _lyric_order_problems(syllables: list[Syllable]) -> list[str]:
-    """Flag lyric timings that would have to be reordered to be written.
+def _lyric_structure_problems(syllables: list[Syllable]) -> list[str]:
+    """Problems that must stop an export, reported before any symptom.
 
-    MIDI delta times can never be negative, so events must be emitted in
-    non-decreasing time. If an edit puts a word before the word before it, the
-    only ways out are reordering (which scrambles the text) or refusing. This
-    refuses, and says exactly which pair is wrong, because a silently scrambled
-    lyric line is far harder to notice than an error message.
+    Without this, two things go wrong silently:
+
+    * A negative start time is clamped to 0 while writing, so a mistyped row
+      would export "successfully" and simply play in the wrong place.
+    * MIDI delta times can never be negative, so timings out of order can only
+      be "fixed" by reordering, which scrambles the text. This refuses instead,
+      naming the offending pair, because a silently scrambled lyric line is far
+      harder to notice than an error message.
     """
-    problems = []
-    for previous, current in zip(syllables, syllables[1:]):
-        if current.start < previous.start - 1e-9:
+    problems: list[str] = []
+
+    if not syllables:
+        return ["No lyrics yet. Add lyric text before exporting."]
+
+    for position, syllable in enumerate(syllables, start=1):
+        label = f"Word {position} ('{syllable.text}')"
+        usable = True
+
+        for field_name, value in (("start", syllable.start), ("end", syllable.end)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                problems.append(f"{label}: '{field_name}' is {value!r}, which is not a usable number.")
+                usable = False
+            elif float(value) < 0:
+                problems.append(
+                    f"{label}: '{field_name}' is {value}. Times start at 0, so it cannot be negative."
+                )
+                usable = False
+
+        if usable and float(syllable.end) < float(syllable.start):
             problems.append(
-                f"lyric '{current.text}' starts at {current.start:.2f}s, before "
-                f"'{previous.text}' at {previous.start:.2f}s - words must stay in order"
+                f"{label}: ends at {syllable.end}s, before it starts at {syllable.start}s."
             )
+
+    for previous, current in zip(syllables, syllables[1:]):
+        try:
+            backwards = float(current.start) < float(previous.start) - 1e-9
+        except (TypeError, ValueError):
+            continue
+        if backwards:
+            problems.append(
+                f"'{current.text}' starts at {current.start}s, which is before the previous word "
+                f"('{previous.text}' at {previous.start}s) - words must stay in order"
+            )
+
     return problems
 
 
@@ -107,11 +139,10 @@ def export_song_to_bytes(
         ppq=ppq,
     )
 
-    # Order problems come first: they are the actionable cause, and the
-    # structural mismatch further down is only a symptom of them.
-    order_problems = _lyric_order_problems(all_syllables(lyric_lines))
-    if order_problems:
-        problems = order_problems + [p for p in problems if "lyric" not in p]
+    # Structural problems are reported first: they are the actionable cause, and
+    # the byte-level mismatch that follows is only a symptom of them.
+    blocking = _lyric_structure_problems(all_syllables(lyric_lines))
+    problems = blocking + [p for p in problems if "lyric" not in p]
 
     name = f"{safe_filename(title)} - {safe_filename(artist, 'Unknown')}".strip()
     return ExportResult(data=data, filename=f"{name}.mid", problems=problems)

@@ -77,6 +77,9 @@ class ParsedMidi:
         return [event for track in self.tracks for event in track if event.kind in ("note_on", "note_off")]
 
 
+TEXT_META_TYPES = frozenset({0x01, 0x03, 0x05, 0x06, 0x07})
+
+
 def _decode(payload: bytes) -> str:
     try:
         return payload.decode("utf-8")
@@ -140,7 +143,7 @@ def _parse_track(chunk: bytes, track_index: int) -> list[Event]:
                     tick=tick,
                     kind="meta",
                     meta_type=meta_type,
-                    text=_decode(payload) if meta_type in (0x01, 0x05) else None,
+                    text=_decode(payload) if meta_type in TEXT_META_TYPES else None,
                 )
             )
             if meta_type == 0x2F:
@@ -176,7 +179,10 @@ def _parse_track(chunk: bytes, track_index: int) -> list[Event]:
             else:
                 events.append(Event(tick=tick, kind="other", channel=channel))
 
-    raise MidiParseError(f"track {track_index}: no end_of_track (FF 2F 00) found")
+    # Real-world karaoke files sometimes omit end_of_track. Return what we
+    # parsed and let check_midi() report the missing terminator, so inspecting
+    # an odd third-party file does not raise instead of explaining itself.
+    return events
 
 
 def parse_bytes(data: bytes) -> ParsedMidi:
@@ -312,6 +318,9 @@ def check_midi(
     for position, track in enumerate(parsed.tracks):
         if not any(e.meta_type == 0x2F for e in track):
             problems.append(f"track {position} has no end_of_track event")
+        ticks = [event.tick for event in track]
+        if ticks != sorted(ticks):
+            problems.append(f"track {position} events are not in time order")
 
     if not any(e.meta_type == 0x51 for track in parsed.tracks for e in track):
         problems.append("no set_tempo (FF 51) event; players will assume 120 BPM")

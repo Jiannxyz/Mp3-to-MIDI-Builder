@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 
 from .lyrics import Syllable, parse_lyrics
 from .midi_build import NoteEvent, NoteTrack
+from .notes import NoteRow
+from .timing import LyricRow
 
 TITLE = "Twinkle Twinkle Little Star"
 ARTIST = "Demo Singer"
@@ -91,3 +93,42 @@ def build_demo_song() -> DemoSong:
         lyric_lines=lyric_lines,
         note_tracks=[melody, bass],
     )
+
+
+def demo_lyric_rows() -> list[LyricRow]:
+    """The demo song as editable table rows.
+
+    `DemoSong.lyric_lines` is nested lists of `Syllable`, which is NOT the shape
+    the timing table consumes. Converting here keeps the demo out of
+    `streamlit_app.py`.
+    """
+    song = build_demo_song()
+    rows: list[LyricRow] = []
+    for line_number, line in enumerate(song.lyric_lines, start=1):
+        for syllable in line:
+            rows.append(
+                LyricRow(
+                    line=line_number,
+                    text=syllable.text,
+                    start=syllable.start,
+                    end=syllable.end,
+                    word_end=syllable.is_word_end,
+                )
+            )
+    return rows
+
+
+def demo_note_rows() -> list[NoteRow]:
+    """The demo song's notes as editable table rows."""
+    song = build_demo_song()
+    return [
+        NoteRow(
+            channel=note.channel,
+            pitch=note.pitch,
+            start=note.start,
+            duration=note.duration,
+            velocity=note.velocity,
+        )
+        for track in song.note_tracks
+        for note in track.notes
+    ]

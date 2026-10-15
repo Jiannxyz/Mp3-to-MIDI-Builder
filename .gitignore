@@ -13,6 +13,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Third-party karaoke files kept only for structural comparison.
+# These contain copyrighted lyrics - never commit, never redistribute.
+reference/
+
 # Generated MIDI files - always regenerate with app.make_*_samples
 out/
 
