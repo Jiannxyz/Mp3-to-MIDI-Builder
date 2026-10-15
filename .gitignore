@@ -1,27 +1,26 @@
-# Python virtual environment (avoids tracking thousands of library files)
+# Virtual environment - can reach several GB once AI deps are added
 .venv/
-env/
 venv/
-ENV/
+env/
 
-# Python cache and compiled files
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
 
-# Operating system files
-Thumbs.db
-Desktop.ini
-.DS_Store
+# Tests
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# IDEs and Editors
-.vscode/
+# Generated MIDI files - always regenerate with app.make_*_samples
+out/
+
+# Uploaded audio and extracted stems stay local; never commit user media
+data/
+
+# Editors / OS
 .idea/
-
-# Large audio/media outputs (optional - add if you don't want to upload large generated files)
-*.mp3
-*.mid
-*.midi
-
-AGENTS.md
+.vscode/
+.DS_Store
+Thumbs.db

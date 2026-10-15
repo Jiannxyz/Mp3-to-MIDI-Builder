@@ -204,6 +204,11 @@ def build_midi(
             _lyric_messages(line, dialect, ppq=ppq, bpm=bpm, lyric_offset=lyric_offset)
         )
 
+    # Guarantee non-decreasing absolute time no matter how the caller ordered
+    # things. sort() is stable, so messages sharing a tick keep their insertion
+    # order (track name, tempo, time/key signature, then lyrics).
+    meta_messages.sort(key=lambda message: message.time)
+
     absolute_tracks: list[list] = [meta_messages]
 
     for track in note_tracks:

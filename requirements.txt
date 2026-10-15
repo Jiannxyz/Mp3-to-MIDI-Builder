@@ -1,0 +1,7 @@
+# Core dependencies for Milestone 1.
+# Deliberately no heavyweight AI libraries (Basic Pitch, Demucs, TensorFlow)
+# in this milestone - see README.md for the Python 3.11 constraint they impose.
+
+mido>=1.3.3
+streamlit>=1.66.0
+pytest>=9.1.1

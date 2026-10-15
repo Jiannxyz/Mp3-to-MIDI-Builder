@@ -84,3 +84,7 @@ DIALECTS: dict[str, Dialect] = {
 }
 
 BASELINE = "A_fmt1_lyrics_ff05"
+
+# The dialect the app uses by default. Verified working in SongHub: title,
+# lyrics and in-time highlighting all correct, melody audible.
+DEFAULT_DIALECT = DIALECTS[BASELINE]
