@@ -18,7 +18,7 @@ from .notes import NoteRow
 from .timing import LyricRow
 
 LYRIC_COLUMNS = ["line", "text", "start (s)", "end (s)", "word end"]
-NOTE_COLUMNS = ["channel", "pitch", "start (s)", "duration (s)", "velocity"]
+NOTE_COLUMNS = ["channel", "pitch", "start (s)", "duration (s)", "velocity", "source"]
 
 
 def to_float(value) -> float:
@@ -103,6 +103,7 @@ def note_rows_to_frame(rows: list[NoteRow]) -> pd.DataFrame:
             "start (s)": pd.Series([r.start for r in rows], dtype="float64"),
             "duration (s)": pd.Series([r.duration for r in rows], dtype="float64"),
             "velocity": pd.Series([r.velocity for r in rows], dtype="int64"),
+            "source": pd.Series([r.source for r in rows], dtype="string"),
         },
         columns=NOTE_COLUMNS,
     )
@@ -117,6 +118,7 @@ def blank_note_frame() -> pd.DataFrame:
             "start (s)": pd.Series(dtype="float64"),
             "duration (s)": pd.Series(dtype="float64"),
             "velocity": pd.Series(dtype="int64"),
+            "source": pd.Series(dtype="string"),
         },
         columns=NOTE_COLUMNS,
     )
@@ -125,6 +127,7 @@ def blank_note_frame() -> pd.DataFrame:
 def frame_to_note_rows(frame: pd.DataFrame) -> list[NoteRow]:
     rows: list[NoteRow] = []
     for _, record in frame.iterrows():
+        source = record.get("source")
         rows.append(
             NoteRow(
                 channel=to_int(record.get("channel")),
@@ -132,9 +135,65 @@ def frame_to_note_rows(frame: pd.DataFrame) -> list[NoteRow]:
                 start=to_float(record.get("start (s)")),
                 duration=to_float(record.get("duration (s)")),
                 velocity=to_int(record.get("velocity")),
+                source="estimated" if str(source).strip().lower() == "estimated" else "manual",
             )
         )
     return rows
+
+
+def estimate_rows_to_frame(items) -> pd.DataFrame:
+    """The review table shown before estimates are added to the note table.
+
+    `items` is a list of (NoteEstimate, group_name) pairs; see
+    `service.assign_groups`. The group is shown so whole groups can be
+    deselected rather than hunting through individual notes.
+    """
+    rows = []
+    for index, (estimate, group) in enumerate(items, start=1):
+        rows.append(
+            {
+                "include": True,
+                "#": index,
+                "group": str(group),
+                "start (s)": round(float(estimate.start), 3),
+                "end (s)": round(float(estimate.end), 3),
+                "length (s)": round(max(0.0, float(estimate.end) - float(estimate.start)), 3),
+                "pitch": int(estimate.pitch),
+                "amplitude": round(float(estimate.amplitude), 3),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=["include", "#", "group", "start (s)", "end (s)", "length (s)", "pitch", "amplitude"],
+    )
+
+
+def frame_to_estimates(frame: pd.DataFrame):
+    """Back to NoteEstimate objects, for the rows the user kept."""
+    from .transcription.contract import NoteEstimate
+
+    estimates = []
+    for _, record in frame.iterrows():
+        if not bool(record.get("include", True)):
+            continue
+        start = to_float(record.get("start (s)"))
+        end = to_float(record.get("end (s)"))
+        pitch = to_int(record.get("pitch"))
+        amplitude = to_float(record.get("amplitude"))
+        if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in (start, end, amplitude)):
+            continue
+        if not isinstance(pitch, int):
+            continue
+        estimates.append(
+            NoteEstimate(
+                start=float(start),
+                end=float(end),
+                pitch=pitch,
+                amplitude=float(amplitude),
+                label=str(record.get("group", "")),
+            )
+        )
+    return estimates
 
 
 def note_frame_for(rows: list[NoteRow]) -> pd.DataFrame:

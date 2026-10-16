@@ -118,7 +118,7 @@ def test_note_rows_survive_a_frame_round_trip():
 def test_blank_note_frame_has_the_right_columns_and_dtypes():
     frame = blank_note_frame()
 
-    assert list(frame.columns) == ["channel", "pitch", "start (s)", "duration (s)", "velocity"]
+    assert list(frame.columns) == ["channel", "pitch", "start (s)", "duration (s)", "velocity", "source"]
     assert len(frame) == 0
     assert str(frame["start (s)"].dtype) == "float64"
 
@@ -176,7 +176,7 @@ def test_note_frame_for_empty_rows_does_not_raise():
 
     assert isinstance(frame, pd.DataFrame)
     assert len(frame) == 0
-    assert list(frame.columns) == ["channel", "pitch", "start (s)", "duration (s)", "velocity"]
+    assert list(frame.columns) == ["channel", "pitch", "start (s)", "duration (s)", "velocity", "source"]
 
 
 def test_note_frame_for_keeps_existing_rows():

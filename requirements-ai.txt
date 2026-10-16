@@ -1,0 +1,48 @@
+# Optional AI extras. NOT installed by default - each one is optional, and the
+# app stays fully usable without any of them.
+#
+# Install into a separate environment so the web app keeps starting fast:
+#
+#     py -3.11 -m venv .venv-ai
+#     .venv-ai\Scripts\python.exe -m pip install -r requirements-ai.txt
+#
+# Then restart the app; it finds .venv-ai automatically.
+#
+# Python 3.10 or 3.11 ONLY. basic-pitch selects its backend by version marker and
+# TensorFlow 2.15.0 publishes cp39/cp310/cp311 Windows wheels only, so it cannot
+# install on 3.12 or newer. Demucs needs torch>=2.1 for the same reason.
+
+# --- 1. Note estimation (Milestone 3) -------------------------------------
+# Pulls in TensorFlow (~500 MB installed). Needed for Step 7 only.
+basic-pitch>=0.4.0
+
+# REQUIRED PIN. resampy (a basic-pitch dependency) does `import pkg_resources`,
+# and setuptools removed that module in v81, so a fresh environment gets
+# "No module named 'pkg_resources'" and every estimate fails. Symptom: the app
+# says the extras are installed, then Step 7 errors on the worker.
+# The warning is noisy and harmless. Remove this line once basic-pitch drops
+# resampy.
+setuptools<81
+
+# --- 2. Stem separation (Milestone 4) ------------------------------------
+# Pulls in torch. This is the heaviest single dependency in the project: the
+# default PyPI torch wheel bundles CUDA and is large. For a CPU-only machine the
+# smaller official build is worth using first:
+#
+#     .venv-ai\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+#     .venv-ai\Scripts\python.exe -m pip install demucs
+#
+# Demucs also needs FFmpeg to read MP3 and other compressed formats. WAV works
+# without it. FFmpeg is a separate OS-level install, not a Python package.
+demucs>=4.1.0
+
+# --- 3. Lyric drafting (Milestone 5) --------------------------------------
+# faster-whisper uses CTranslate2 and needs NO torch, so it is much lighter than
+# openai-whisper or stable-ts. It also gives word-level timestamps, which is what
+# the draft timings are estimated from.
+#
+# The model itself downloads on first use: tiny ~75 MB, base ~145 MB, small
+# ~480 MB, medium/large-v3 much larger and very slow on CPU.
+#
+# vosk was considered and rejected: it publishes no Windows wheels.
+faster-whisper>=1.2.1

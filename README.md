@@ -3,14 +3,16 @@
 A local web app that builds karaoke MIDI files (`.mid`) with musical notes and
 timestamped lyrics, for use in **SongHub Karaoke PC**.
 
-**Status: Milestone 2.** You can upload an MP3 or WAV, enter the song title and
-singer, paste lyrics, and correct the timing of every word and note by hand in
-editable tables. The app then exports a karaoke MIDI for SongHub.
+**Status: Milestones 1-5.** Upload an MP3 or WAV, enter the song title and
+singer, paste lyrics, correct every word's timing by hand, and optionally
+**estimate notes** (Basic Pitch), **separate the song into stems** (Demucs) and
+**draft lyrics** (faster-whisper).
 
-**This milestone does not listen to the audio.** It does not work out notes,
-lyrics, or an arrangement for you. The lyric timing table and the MIDI note
-table are manual tools — and they remain the way you correct anything a later
-transcription milestone gets wrong.
+**The AI is optional and does not pretend to be a musician.** Every model here
+produces a guess. Basic Pitch is a note tracker, not an arranger: on a complete
+mix it returns a rough sketch, not a transcription. Speech recognition is trained
+on speech, not singing, so drafted words and timings are usually wrong. All of
+it is labelled, and all of it is editable.
 
 Personal use only. Process only audio and lyrics you are authorized to use.
 
@@ -90,17 +92,27 @@ The page is one numbered flow from top to bottom.
    preview and to warn you when lyrics run past the end.
 2. **Step 2 - Song title and singer.** SongHub shows these as
    `[Song title] - [Singer]`.
-3. **Step 3 - Lyrics.** Paste your lyrics, one line of the song per line, then
-   press **Split lyrics into rows**. Choose *words* (safer) or *syllables*
+3. **Step 3 - Lyrics.** Paste your own lyrics, one line of the song per line,
+   then press **Split lyrics into rows**. Choose *words* (safer) or *syllables*
    (a rough guess — it gets "hello" right and "karaoke" wrong; every row stays
-   editable).
+   editable). **This is the primary path and always works.**
+   *Generate a draft for me* is an optional extra that pre-fills the same box
+   with a guess you can overwrite or discard.
 4. **Step 4 - Check and correct the timings.** One row per word or syllable with
    its own start and end time in seconds. Edit any cell. Errors appear with the
    row number and what to do about them.
 5. **Step 5 - MIDI notes.** Type the notes yourself. Pitch 60 is middle C,
    channel 0 is treated as the vocal melody. **Leaving this empty is fine** and
    exports a lyrics-only file.
-6. **Step 6 - Preview and export.** The lyric sequence is shown next to the audio
+6. **Step 6 - Separate the song into stems (optional).** Splits the audio into
+   vocals / bass / drums / other with Demucs. You can listen to each stem, and
+   Step 7 will then offer them as sources for note estimation. Your original
+   file is never modified.
+7. **Step 7 - Estimate notes from the audio (optional).** Estimates notes with
+   Basic Pitch, from the whole song or from a separated stem. Shows them in a
+   review table so you can untick the ones you do not want before adding them
+   to Step 5. See the warnings above.
+8. **Step 8 - Preview and export.** The lyric sequence is shown next to the audio
    player so you can check the timing against the music. Press **Generate MIDI
    file**, then **Download MIDI**.
 
@@ -178,6 +190,116 @@ audio start before the countdown has finished.
 
 ---
 
+## Optional AI extras (note estimation, stem separation, lyric drafting)
+
+Everything above works without these. Each is optional on its own, and the app
+tells you which ones are installed rather than failing.
+
+```powershell
+py -3.11 -m venv .venv-ai
+.venv-ai\Scripts\python.exe -m pip install -r requirements-ai.txt
+```
+
+Restart the app. It finds `.venv-ai` automatically.
+
+**Python 3.10 or 3.11 only.** `basic-pitch` picks its backend from a version
+marker, and TensorFlow 2.15.0 publishes cp39/cp310/cp311 Windows wheels only —
+it cannot install on 3.12 or newer.
+
+| Extra | Pulls in | Used for | Cost |
+|---|---|---|---|
+| `basic-pitch` | TensorFlow (~500 MB) | Step 7 note estimates | heavy |
+| `demucs` | `torch>=2.1` | Step 6 stem separation | **heaviest** |
+| `faster-whisper` | CTranslate2, **no torch** | Step 3 lyric drafts | light-ish |
+
+For a CPU-only machine, install a smaller torch build first:
+
+```powershell
+.venv-ai\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv-ai\Scripts\python.exe -m pip install demucs
+```
+
+> **If Step 7 fails with `No module named 'pkg_resources'`:** `resampy`, a
+> basic-pitch dependency, imports `pkg_resources`, which setuptools removed in
+> v81. Fix it with
+> `.venv-ai\Scripts\python.exe -m pip install "setuptools<81"`.
+> The pin is in `requirements-ai.txt`. A `pkg_resources is deprecated` warning
+> afterwards is noisy and harmless.
+
+**FFmpeg** is separate and is *not* a Python package. It is needed to read MP3
+and other compressed formats for separation or drafting. WAV works without it,
+and MIDI export never needs it.
+
+### First run needs a network connection
+
+The three models are obtained differently, which decides whether a feature works
+offline:
+
+| Feature | Model download | Works offline afterwards |
+|---|---|---|
+| Note estimation (Basic Pitch) | **bundled in the pip package** | yes, always |
+| Stem separation (Demucs) | ~80 MB from HuggingFace on first use | yes, after |
+| Lyric drafting (faster-whisper) | ~75 MB (`tiny`) to ~480 MB (`small`) on first use | yes, after |
+
+A first model download can take a while. The app checks the download speed
+*before* starting, so you get one of three answers in a few seconds:
+
+- **Already cached** — nothing is downloaded and no network call is made.
+- **Feasible** — it starts, and shows how many bytes of how many have arrived.
+- **Refused** — it says your measured speed, the file size, and the time it
+  would take, instead of leaving you watching a progress bar that never moves:
+
+  > Your connection downloads this model at 0.04 MB/s. 955717e8.safetensors is
+  > 80 MB, which would take about 34 minutes here. The download can be resumed,
+  > so it will pick up where it stopped if you run it again.
+
+Stem separation downloads the weights itself with resumable HTTP range requests,
+because connections on a slow link get reset part-way through (you may see
+`ConnectionResetError: [WinError 10054]` in a terminal). Progress survives a
+reset, so an interrupted download continues instead of starting over. If the
+transfer stops making progress for a minute, it is resumed too.
+
+If the download is stalled entirely, the app notices after about 90 seconds and
+stops, rather than leaving you waiting. You will see:
+
+> The model download made no progress for 90 seconds and was stopped. This is a
+> blocked or stalled download, not slow processing. Your network reaches the
+> site but not the model files.
+
+Either run that step once on a network that allows the download (the model is
+then cached and works offline), copy your `.cache\huggingface\hub` folder from a
+machine that has it, or skip the step — the rest of the app works without it.
+
+To check what has been fetched so far:
+
+```powershell
+Get-ChildItem "$env:USERPROFILE\.cache\huggingface\hub" -Recurse -File |
+  Measure-Object Length -Sum
+```
+
+### How good are the results?
+
+Honestly: they are starting points, not answers.
+
+- **Note estimates** — Basic Pitch reports onsets and pitches. It does not
+  identify instruments, so a full mix produces a simplified melody line, usually
+  without bass or chords. It works far better on **one instrument at a time**
+  than on a complete song. Because of this, Step 7 groups notes by **pitch**
+  (bass / mid / treble) so you can keep a melody and discard the rest.
+- **Separated stems** are **not clean isolated instruments**. Each stem still
+  contains bleed from the others, so an estimate from a stem is still
+  approximate. Separation helps mainly by giving a note tracker one
+  single-line source instead of a mix — it does not make the result correct.
+  The app recommends the **vocals** stem when present, because a sung melody is
+  monophonic, and refuses to offer **drums**, which are percussive.
+- **Drafted lyrics** are the least reliable of the three. Speech recognition is
+  trained on speech, not singing, so expect wrong words, wrong spelling and
+  roughly-plausible timings. The draft is written into the normal lyrics box so
+  you can overwrite it entirely, and its timings are labelled ESTIMATED.
+
+Estimated notes are marked `estimated` in the Step 5 table and never overwrite
+your lyric timings. Your original audio is never modified or deleted.
+
 ## How the MIDI is built
 
 - One **lyric meta event (`FF 05`)** per word, timed at the moment it is sung.
@@ -219,8 +341,23 @@ app/
   tables.py             DataFrame <-> row conversion for st.data_editor
   inspect_midi.py       structural report for any .mid file
   make_*_samples.py     generated calibration files for manual testing
+  transcription/
+    contract.py         NoteEstimate / TranscriptionResult - the model contract
+    service.py          facade used by the UI (availability, orchestration)
+    bridge.py           runs the worker in a separate interpreter
+    worker.py           the ONLY module importing basic_pitch
+    audio_convert.py    makes any input a WAV Basic Pitch can read
+  separate/
+    contract.py         StemInfo / SeparationResult - the model contract
+    service.py          facade used by the UI
+    worker.py           the ONLY module importing demucs
+  draft_lyrics/
+    contract.py         DraftWord / LyricDraft - the model contract
+    service.py          facade used by the UI
+    worker.py           the ONLY module importing faster_whisper
+  ai_process.py         shared subprocess protocol for all three services
 streamlit_app.py        the web page
-tests/                  158 automated tests
+tests/                  310 automated tests
 ```
 
 `tests/test_m2_app_smoke.py` runs the Streamlit script in-process with
@@ -241,12 +378,13 @@ python -m app.make_offset_samples   # lyric offset calibration
 
 ## Not in this milestone
 
-- **Audio-to-MIDI transcription** (Basic Pitch) — the note table is manual
-- **Vocal/instrument separation** (Demucs)
-- **Automatic lyric transcription and timing** — the timing table is manual
-- Any upload of your audio to a server: processing is entirely local
+- **Automatic lyric timing** — drafted timings are estimates and must be
+  corrected by hand in Step 4
+- Anything that contacts an external service: no lyric lookups, no song
+  downloads, no uploads. All three models run on this machine
 
-None of Demucs, Basic Pitch or any other heavyweight AI library is installed.
+None of Basic Pitch, Demucs or faster-whisper is installed by default; they are
+opt-in in `requirements-ai.txt`.
 
 ---
 

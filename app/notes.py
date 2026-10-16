@@ -25,13 +25,23 @@ DEFAULT_DURATION = 0.5
 
 @dataclass
 class NoteRow:
-    """One editable note."""
+    """One editable note.
+
+    `source` is "manual" or "estimated". It exists so the UI can keep
+    transcribe-suggested notes visually distinct from notes typed by hand - the
+    two have very different reliability and must not be confused.
+    """
 
     channel: int = 0
     pitch: int = DEFAULT_PITCH
     start: float = 0.0
     duration: float = DEFAULT_DURATION
     velocity: int = 80
+    source: str = "manual"
+
+    @property
+    def is_estimated(self) -> bool:
+        return self.source == "estimated"
 
 
 def empty_note_rows() -> list[NoteRow]:

@@ -10,9 +10,10 @@ is uploaded, no lyrics are scraped, no commercial karaoke files are downloaded.
 
 ## Repo state
 
-Branch `main`, **no remote configured**. Milestones 1-2 complete: MIDI export
-service and Streamlit page (upload, lyrics, timing table, note table, export),
-158 tests. Milestone 3+ not started.
+Branch `main`, **no remote configured**. Milestones 1-5 complete: MIDI export
+service, Streamlit page (upload, lyrics, optional draft, timing table, note
+table, optional stem separation, optional note estimation, export), 310 tests.
+Milestone 6+ not started.
 
 ```
 app/karaoke_dialects.py   swappable dialect definitions; DEFAULT_DIALECT is the one to use
@@ -27,9 +28,268 @@ app/notes.py              note table rows + validation (pure, no Streamlit)
 app/tables.py             DataFrame <-> row conversion (pure; keeps streamlit_app.py thin)
 app/inspect_midi.py       structural report for any .mid file
 app/make_*_samples.py     generated calibration files for manual SongHub testing
+app/ai_process.py         SHARED subprocess protocol for all three AI services
+app/transcription/        note estimation   (only worker.py imports basic_pitch)
+app/separate/             stem separation   (only worker.py imports demucs)
+app/draft_lyrics/         lyric drafting    (only worker.py imports faster_whisper)
 streamlit_app.py          the web page
-tests/test_m2_*.py        Milestone 2: timing, audio, notes, tables
+tests/test_m4_*.py        separation: contract, worker, errors, original-file safety
+tests/test_m5_*.py        drafting: contract, worker, errors, manual fallback
+tests/test_m45_app_smoke.py  the real app script, both services mocked/absent
 ```
+
+## The three AI services: one shape, three models
+
+`ai_process.run_python_worker` is the shared subprocess protocol; each service
+adds only its own `contract.py`, `worker.py`, `bridge.py`, `service.py`.
+
+| Service | Model | Heavy dependency | Step |
+|---|---|---|---|
+| `transcription` | Basic Pitch | TensorFlow ~500 MB | 7 |
+| `separate` | Demucs | `torch>=2.1` (heaviest) | 6 |
+| `draft_lyrics` | faster-whisper | CTranslate2, **no torch** | 3 |
+
+- **vosk was rejected for drafting**: it publishes no Windows wheels.
+  `openai-whisper`/`stable-ts` were rejected because they need torch and give no
+  advantage over faster-whisper here.
+- **The core app never imports a model library.** Only each `worker.py` does.
+- `resolve_backend()` stays a module-level name **in every service's bridge**, so
+  tests patch it there. `ai_process` deliberately does not resolve the
+  interpreter itself — that was the one design choice needed to keep
+  `transcription/bridge.py`'s existing tests passing.
+
+## Probe the real entry point, and name the real culprit
+
+Two bugs from one incident. `import basic_pitch` **succeeds** while
+`from basic_pitch.inference import predict` **fails**, because the package
+`__init__` only probes optional extras while the real entry point pulls in
+`resampy -> pkg_resources` (removed in setuptools 81). So:
+
+- Every `*_available()` probes the **same import the worker performs**, with
+  `module_available(python, "basic_pitch.inference", "predict")`. Probing the
+  bare package name reported "available" and then every real run failed.
+- The workers classify an `ImportError` via `import_error_message`, which uses
+  `ModuleNotFoundError.name` to say "basic_pitch is not installed" versus
+  "basic_pitch is installed, but 'pkg_resources' could not be imported". The old
+  message blamed basic_pitch when basic_pitch was installed fine, which sends
+  the user to reinstall something they already have.
+- That classifier is **duplicated in all three workers on purpose** so each stays
+  standalone (no `from app` at module level). `test_dependency_probe.py` pins
+  their behaviour so they cannot drift.
+- `requirements-ai.txt` pins `setuptools<81` with the reason.
+
+## Model weights: bundled vs downloaded at run time
+
+This difference decides whether a feature works offline, and it is not obvious:
+
+| Service | Where the model comes from | Offline? |
+|---|---|---|
+| `transcription` (Basic Pitch) | **Bundled inside the pip wheel** | works offline |
+| `separate` (Demucs) | Downloads `htdemucs` from HuggingFace on first run | needs network once |
+| `draft_lyrics` (faster-whisper) | Downloads the model on first run | needs network once |
+
+Basic Pitch is verified end to end (440 Hz -> MIDI 69) partly because its model
+ships in the package. Demucs and faster-whisper download weights from the
+HuggingFace hub on first run.
+
+## Demucs weights: slow and reset, NOT blocked (do not re-diagnose)
+
+An earlier version of this file claimed HuggingFace egress was blocked. **That
+was wrong**, and the claim has been measured and disproved. Do not repeat it.
+
+| Question | Answer (measured) |
+|---|---|
+| Which host? | `huggingface.co`, repo `adefossez/HTDemucs` — **not** `dl.fbaipublicfiles.com` |
+| Is it reachable? | Yes. `HEAD` returns 200, 80 102 544 bytes, `accept-ranges: bytes` |
+| Does progress happen? | Yes, at **0.04-0.11 MB/s** (30-110 KB/s) |
+| Is that enough? | No. 80 MB is **12-33 minutes**, and it resets mid-transfer |
+
+`dl.fbaipublicfiles.com` returns 403, but that URL is Demucs' **legacy fallback
+repo**, which 4.x never touches. A 403 there says nothing about the real
+download — treating it as the cause was the first wrong turn.
+
+Three separate faults stacked up to look like one hang:
+
+1. **`hf_xet` fails outright.** `hf_hub_download` defaults to Xet, which dies
+   with `RuntimeError: Task error: File reconstruction error: CAS Client Error:
+   Request middleware error` against `us.aws.cdn.hf.co/xorbs/...`. The worker
+   sets `HF_HUB_DISABLE_XET=1` before importing anything.
+2. **Plain `huggingface_hub` transfers stall at 0 bytes.** Measured: the process
+   held the blob lock for 6+ minutes using 1.1 s of CPU and wrote nothing, while
+   a bare `urllib` GET of the same URL moved bytes. That is the 3600 s "hang".
+3. **Resets restart the file.** `ConnectionResetError: [WinError 10054]` mid-body
+   makes huggingface_hub begin again from zero, and several `.incomplete` blobs
+   with different etags accumulate. At 0.04 MB/s a restart never finishes, so
+   the symptom is a hang rather than an error.
+
+### The fix: fetch the weights ourselves, resumably
+
+`app/separate/worker.py` downloads the checkpoint with stdlib `urllib` and HTTP
+`Range` requests straight into the HuggingFace cache layout, so a dropped
+connection costs only the bytes in flight. `hf_hub_download` then finds it and
+the normal code path takes over.
+
+- `_stream_to_file` resumes from the partial file's length and **truncates back
+  to zero if the server answers 200 instead of 206**, because appending a whole
+  body to a partial file would silently corrupt it.
+- `fetch_weight` measures what is **on disk** after each attempt, not what the
+  last call returned: a connection dropped on the final chunk still completed the
+  file, and trusting the return value would retry a finished download until the
+  attempts ran out. A regression test caught exactly that.
+- `clean_stale_partials` deletes zero-byte `.incomplete` blobs (unresumable, pure
+  waste) and **keeps** any that still hold bytes.
+
+### Preflight: measure before waiting
+
+`preflight()` runs before `Separator()` is constructed, so a hopeless download
+costs 8 seconds instead of an hour:
+
+- all files cached -> skip entirely, no network probe at all;
+- else `HEAD` for the size, then 6 s of real transfer for the rate, and refuse
+  with `reason="too-slow"` when the projection exceeds `MAX_DOWNLOAD_SECONDS`.
+
+`MAX_DOWNLOAD_SECONDS` is 900. On the measured 0.106 MB/s link the projection is
+~758 s, so it proceeds — barely. A slower moment refuses with the numbers.
+
+**A stalled model download looks exactly like a hang.** `run_python_worker` uses
+`Popen` and polls, and while the worker is in the `downloading-model` phase it
+watches the HuggingFace cache for growth. No growth for 90 s means blocked, so it
+kills the process and reports `kind="stalled-download"`. Verified for real: the
+same run that took 3600 s now fails in 96 s with an accurate message. The growth
+check only applies during the download phase, so genuinely slow processing still
+gets the full timeout.
+
+Workers write their stage to a `<output>.phase` file as `name|detail`, and
+`read_phase_detail` surfaces the second half. The downloader uses it to report
+`bytes/total` throughout a 12-minute transfer, so a slow run can still explain
+itself.
+
+`stdout`/`stderr` go to temp files rather than PIPE, because torch and librosa
+log heavily and a full pipe buffer would deadlock the child while we poll it.
+The log directory is removed with `shutil.rmtree(ignore_errors=True)`, **not**
+`TemporaryDirectory`: a killed child's inherited handles are not released
+instantly on Windows and `TemporaryDirectory` raises `PermissionError` during
+cleanup, masking the real error.
+
+To confirm a failure is network and not a code bug, read the worker's stderr: if
+it reaches the "unauthenticated requests to the HF Hub" warning, torch and
+demucs imported fine and only the download is stuck.
+
+**Workers record their stage** in a `<output>.phase` file
+(`downloading-model` then `processing`). `ai_process` reads it on timeout, so the
+message names the real cause instead of always blaming slow CPU work. Verified
+against a real stalled download, the message now says "that download appears to
+be stalled. This is not slow processing". Keep the phase writes when editing a
+worker; `tests/test_timeout_phases.py` covers both branches.
+
+## Milestones 4-5 rules
+
+- **Never modify or delete the user's audio.** Separation refuses an output
+  folder that is the source's own folder, clears stale stems before a run, and
+  re-checks the source exists afterwards. Tested end to end.
+- **Stems are not clean instruments.** Every surface says so. Demucs output
+  still bleeds. Separation helps because a note tracker copes better with one
+  monophonic-ish source, not because it is accurate.
+- **Drums are never offered as a note source**; vocals are recommended first.
+- **Never present drafted lyrics as real.** ASR is trained on speech, not
+  singing. The draft lands in the normal lyrics box, is labelled, and can be
+  discarded or overwritten. The manual editor must work with the model absent,
+  missing or crashing — there are tests for all three.
+- CPU runs state their cost up front rather than letting the user assume a hang.
+
+## Programmatic updates to a keyed widget
+
+`st.session_state["x"] = ...` is **discarded** if the widget with key `"x"` was
+already created earlier in the same run. The lyrics box therefore writes to
+`pending_lyrics_text` and reruns, consuming it at the top of Step 3 **before**
+the `st.text_area` is created. `st.rerun()` alone does not fix this.
+Same class of bug as the `st.data_editor` feedback loop; the versioned editor
+keys (`lyric_editor_{version}`) are the other half of the pattern.
+
+## Milestone 3: how note estimation is isolated
+
+```
+streamlit_app.py -> app.transcription.service -> bridge.py -> subprocess
+                                                                 |
+                                                    .venv-ai python
+                                                                 |
+                                                         worker.py -> basic_pitch
+```
+
+- **The core app never imports basic_pitch, TensorFlow or librosa.** Only
+  `app/transcription/worker.py` does. Everything else works without them, and
+  `pytest` never touches the model.
+- `worker.py` is a **standalone script**: stdlib at module level, `basic_pitch`
+  imported lazily inside the function. A test asserts it has no `from app` at
+  module level. That is what lets a different interpreter run it.
+- Results cross the process boundary as **JSON written to a file**, not stdout,
+  because TensorFlow and librosa log freely and would corrupt a stdout protocol.
+  A `__KMB_JSON__` marker line is emitted on stdout as a fallback.
+- **`requirements-ai.txt` is opt-in.** TensorFlow 2.15 publishes cp39/cp310/cp311
+  Windows wheels only, so the AI environment must be Python 3.10 or 3.11 while
+  the app itself runs on 3.11.
+- `bridge.basic_pitch_available` is **cached per interpreter** because the
+  script re-runs on every interaction and the probe spawns a process.
+
+### Basic Pitch API facts (verified from v0.4.0 source, not guessed)
+
+```python
+model_output, midi_data, note_events = predict(audio_path, model_or_model_path=..., ...)
+# note_events entries: (start, end, pitch, amplitude, pitch_bends)
+```
+
+It is **not** `(model, path)` and **not** `(events, labels, pitches)` — an
+earlier guess at that signature would have failed at runtime. `worker.py`
+retries with the bare positional path if keyword arguments are rejected, for
+older/newer versions. v0.4.0 reports **no instrument labels**, so notes group
+under `unlabelled`; pitch banding (bass/mid/treble) is offered instead.
+
+### Estimation rules
+
+- **Never present estimates as a transcription.** Basic Pitch is a note tracker;
+  on a full mix it returns a rough sketch without bass or chords. It works best
+  on one instrument at a time. The UI carries this warning and the worker
+  returns one in its payload.
+- Estimated rows carry `source="estimated"` so they stay visibly distinct from
+  hand-typed notes. **Estimation must never touch lyric rows.**
+- Estimation being unavailable is a normal state, not an error: export and the
+  whole app must keep working.
+
+## Never name a module after a standard library module
+
+Running a script puts **its own directory first on `sys.path`**. `worker.py` is
+run by path, so everything beside it in `app/transcription/` shadows a stdlib
+name of the same spelling. `types.py` there broke the worker instantly:
+`argparse → re → enum → types` crashed with "cannot import name 'GenericAlias'",
+so estimation failed with a confusing error about standard-library internals
+instead of the real cause.
+
+It is now `contract.py`. Two tests guard the whole `app/` tree against the
+class of mistake, and one runs the worker as a **real subprocess** the way the
+bridge does:
+
+- `test_no_module_under_app_shadows_the_standard_library` — compares every
+  `app/**/*.py` stem against `sys.stdlib_module_names`
+- `test_worker_runs_as_a_real_subprocess_the_way_the_bridge_does` — asserts a
+  clean *dependency* error rather than a stray stdlib ImportError
+
+Loading `worker.py` with `importlib` in a test does **not** reproduce this, which
+is exactly why it reached the user. Test the way it runs.
+
+## Real model verification (opt-in)
+
+Everything else mocks inference. To exercise the actual model:
+
+```powershell
+$env:KMB_RUN_AI_TESTS = "1"
+.venv\Scripts\python.exe -m pytest tests/test_m3_transcription.py -k real_model -q
+```
+
+Requires `.venv-ai` with `requirements-ai.txt` installed, and downloads the model
+on first run. It is slow on CPU — roughly **9 minutes** for both tests, because
+TensorFlow loads twice in separate subprocesses. Verified end to end: a
+generated 440 Hz tone is detected as MIDI 69 (A4) and a 220 Hz tone as MIDI 57
+(A3), both correct, and the estimates convert cleanly to exportable note rows.
 
 ## Never trust `streamlit run` + HTTP 200 as an app test
 
